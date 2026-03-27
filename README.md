@@ -8,26 +8,19 @@ A header-only C++23 library that prices barrier options via Monte Carlo simulati
 
 | Feature | Status |
 |:--------|:------:|
-| `std::experimental::simd` throughout (no fake SIMD) | ✅ |
-| Vectorised `exp()` — minimax polynomial, 8× `vfmadd`, zero `call expf@PLT` | ✅ |
-| Vectorised `log()` — IEEE 754 decomposition, (m-1)/(m+1) rational polynomial | ✅ |
-| Vectorised Philox-2x32-10 RNG — `vpmuludq` + `vpxord`, zero scalar hash calls | ✅ |
-| SIMD step counter — `IntV` register, `vpcmpd` + masked `vpsubd` | ✅ |
-| Zero-cost bit reinterpretation — `__builtin_bit_cast` compiles to `ret` | ✅ |
-| SIMD floor — `vcvttps2dq` + `vcvtdq2ps` + masked `vsubps` | ✅ |
-| Box-Muller caching (halves transcendental cost) | ✅ |
-| Brownian bridge barrier correction (compile-time toggle via `if constexpr`) | ✅ |
-| Antithetic variance reduction in recovered lanes | ✅ |
-| Adaptive compaction threshold | ✅ |
-| Welford's online variance (numerically stable std error) | ✅ |
-| Policy-based architecture (6 C++20 concepts, zero virtuals on hot path) | ✅ |
-| AVX-512 native `VCOMPRESSPS` compaction backend | Planning |
-| Pathwise / likelihood ratio Greeks | Planning |
-| Quasi-Monte Carlo (Sobol sequences) | Planning |
-| OpenMP multi-threading across path batches | Planning |
-| Double precision support | Planning |
-| Migration to C++26 `std::simd` | Planning |
-
+| `std::experimental::simd` throughout (no fake SIMD) | Yes |
+| Vectorised `exp()` — minimax polynomial, 8× `vfmadd`, zero `call expf@PLT` | Yes |
+| Vectorised `log()` — IEEE 754 decomposition, (m-1)/(m+1) rational polynomial | Yes |
+| Vectorised Philox-2x32-10 RNG — `vpmuludq` + `vpxord`, zero scalar hash calls | Yes |
+| SIMD step counter — `IntV` register, `vpcmpd` + masked `vpsubd` | Yes |
+| Zero-cost bit reinterpretation — `__builtin_bit_cast` compiles to `ret` | Yes |
+| SIMD floor — `vcvttps2dq` + `vcvtdq2ps` + masked `vsubps` | Yes |
+| Box-Muller caching (halves transcendental cost) | Yes |
+| Brownian bridge barrier correction (compile-time toggle via `if constexpr`) | Yes |
+| Antithetic variance reduction in recovered lanes | Yes |
+| Adaptive compaction threshold | Yes |
+| Welford's online variance (numerically stable std error) | Yes |
+| Policy-based architecture (6 C++20 concepts, zero virtuals on hot path) | Yes |
 </div>
 
 ---
@@ -111,7 +104,7 @@ With SIMD, `W` paths evolve in parallel across a single register. But when a pat
 
 ### The Problem
 
-On a `W=8` AVX2 register pricing a barrier 5% below spot with 252 daily steps, lane utilisation can collapse to **25–45%** by mid-simulation. You expected an 8× speedup; you got 2×.
+On a `W=8` AVX2 register pricing a barrier 5% below spot with 252 daily steps, lane utilisation can collapse to **25–45%** by mid-simulation. You expected an 8x speedup; you got 2x.
 
 This is the CPU SIMD analogue of **GPU warp divergence**. GPUs solve it with stream compaction — dead threads are replaced with fresh work. Nobody had applied this technique to CPU SIMD financial Monte Carlo.
 
@@ -145,8 +138,6 @@ The analytical Black-Scholes vanilla price is exact, so the knock-in estimate in
 ---
 
 ## Assembly Verification
-
-The GBM inner loop — `spot * exp(drift + vol*Z)` — compiles to genuine SIMD with **zero scalar library calls**.
 
 Verify with:
 ```bash
@@ -207,10 +198,10 @@ The only scalar fallback on the per-step path is `sincos` in Box-Muller — miti
 
 | Test | MC Price | Black-Scholes | Error | Result |
 |:-----|:---------|:-------------|:------|:------:|
-| ATM Call (S₀=K=100) | 10.4445 | 10.4506 | 0.0061 | ✅ |
-| ATM Put (S₀=K=100) | 5.5706 | 5.5735 | 0.0029 | ✅ |
-| ITM Call (K=90, σ=30%) | 15.4809 | 15.4860 | 0.0051 | ✅ |
-| OTM Call (K=110, σ=30%) | 5.5813 | 5.5871 | 0.0058 | ✅ |
+| ATM Call (S₀=K=100) | 10.4445 | 10.4506 | 0.0061 | Yes |
+| ATM Put (S₀=K=100) | 5.5706 | 5.5735 | 0.0029 | Yes |
+| ITM Call (K=90, σ=30%) | 15.4809 | 15.4860 | 0.0051 | Yes |
+| OTM Call (K=110, σ=30%) | 5.5813 | 5.5871 | 0.0058 | Yes |
 
 </div>
 
@@ -296,12 +287,12 @@ Six C++20 concepts define the engine's extension points. Every policy call is in
 
 | Concept | Responsibility | Example | Hot Path? |
 |:--------|:--------------|:--------|:---------:|
-| `DiffusionModel` | Advance spot prices one step | `models::GBM` | ✅ |
-| `BarrierCondition` | Determine which lanes survive | `barriers::DownAndOutBridge` | ✅ |
-| `Payoff` | Compute terminal value | `payoffs::Call` | ✅ |
-| `RefillPolicy` | Decide what fills recovered lanes | `refill::AntitheticPreferred` | ❌ |
-| `CompactionStrategy` | Decide when to compact | `compaction::Adaptive` | ❌ |
-| `RandomEngine` | Produce SIMD-width random draws | `rng::Philox` | ✅ |
+| `DiffusionModel` | Advance spot prices one step | `models::GBM` | Yes |
+| `BarrierCondition` | Determine which lanes survive | `barriers::DownAndOutBridge` | Yes |
+| `Payoff` | Compute terminal value | `payoffs::Call` | Yes |
+| `RefillPolicy` | Decide what fills recovered lanes | `refill::AntitheticPreferred` | No |
+| `CompactionStrategy` | Decide when to compact | `compaction::Adaptive` | No |
+| `RandomEngine` | Produce SIMD-width random draws | `rng::Philox` | Yes |
 
 </div>
 
@@ -345,7 +336,7 @@ cmake ../.. && ninja
 ### Project Structure
 ```
 simd_mc/
-├── src/simd_mc/           # Header-only library (13 headers, ~1050 lines)
+├── src/simd_mc/           # Header-only library
 │   ├── core/              # simd_compat.hpp, lane_register.hpp, sim_config.hpp
 │   ├── concepts/          # 6 policy concepts
 │   ├── models/            # GBM diffusion
