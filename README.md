@@ -1,17 +1,16 @@
 # `simd_mc` — Stream-Compacting Barrier Option Monte Carlo
 
-## C++23 | `std::experimental::simd` | Zero Scalar `expf` Calls on Hot Path
+## C++23 | `std::experimental::simd`
 
-A header-only C++23 library that prices barrier options via Monte Carlo simulation using `std::experimental::simd` (Parallelism TS 2, GCC 11+). Solves the *dead lane problem* — the systematic underutilisation of SIMD registers when simulated paths are knocked out by a barrier — through in-register stream compaction borrowed from GPU warp divergence literature.
+A header-only C++23 library that prices barrier options via Monte Carlo simulation using `std::experimental::simd` (Parallelism TS 2, GCC 11+). Solves the dead lane problem — the systematic underutilisation of SIMD registers when simulated paths are knocked out by a barrier — through in-register stream compaction borrowed from GPU warp divergence literature.
 
 <div align="center">
 
 | Feature | Status |
 |:--------|:------:|
-| `std::experimental::simd` throughout (no fake SIMD) | Yes |
-| Vectorised `exp()` — minimax polynomial, 8× `vfmadd`, zero `call expf@PLT` | Yes |
+| Vectorised `exp()` — minimax polynomial, 8× `vfmadd` | Yes |
 | Vectorised `log()` — IEEE 754 decomposition, (m-1)/(m+1) rational polynomial | Yes |
-| Vectorised Philox-2x32-10 RNG — `vpmuludq` + `vpxord`, zero scalar hash calls | Yes |
+| Vectorised Philox-2x32-10 RNG — `vpmuludq` + `vpxord` | Yes |
 | SIMD step counter — `IntV` register, `vpcmpd` + masked `vpsubd` | Yes |
 | Zero-cost bit reinterpretation — `__builtin_bit_cast` compiles to `ret` | Yes |
 | SIMD floor — `vcvttps2dq` + `vcvtdq2ps` + masked `vsubps` | Yes |
@@ -20,7 +19,6 @@ A header-only C++23 library that prices barrier options via Monte Carlo simulati
 | Antithetic variance reduction in recovered lanes | Yes |
 | Adaptive compaction threshold | Yes |
 | Welford's online variance (numerically stable std error) | Yes |
-| Policy-based architecture (6 C++20 concepts, zero virtuals on hot path) | Yes |
 </div>
 
 ---
