@@ -2,19 +2,18 @@
 
 ## C++23 | `std::experimental::simd`
 
-A header-only C++23 library that prices barrier options via Monte Carlo simulation using `std::experimental::simd` (Parallelism TS 2, GCC 11+). Solves the dead lane problem — the systematic underutilisation of SIMD registers when simulated paths are knocked out by a barrier — through in-register stream compaction borrowed from GPU warp divergence literature.
+A header-only C++23 library that prices barrier options via Monte Carlo simulation using `std::experimental::simd` (Parallelism TS 2, GCC 11+). Solves the dead lane problem - the systematic underutilisation of SIMD registers when simulated paths are knocked out by a barrier - via an in-register stream compaction implementation stolen from the people who figured it out for the GPU :)
 
 <div align="center">
 
-| Feature | Status |
+| Feature | Assembly-verified SIMD |
 |:--------|:------:|
-| Vectorised `exp()` — minimax polynomial, 8× `vfmadd` | Yes |
+| Vectorised `exp()` — minimax polynomial | Yes, 8× `vfmadd` |
 | Vectorised `log()` — IEEE 754 decomposition, (m-1)/(m+1) rational polynomial | Yes |
-| Vectorised Philox-2x32-10 RNG — `vpmuludq` + `vpxord` | Yes |
-| SIMD step counter — `IntV` register, `vpcmpd` + masked `vpsubd` | Yes |
-| Zero-cost bit reinterpretation — `__builtin_bit_cast` compiles to `ret` | Yes |
-| SIMD floor — `vcvttps2dq` + `vcvtdq2ps` + masked `vsubps` | Yes |
-| Box-Muller caching (halves transcendental cost) | Yes |
+| Vectorised Philox-2x32-10 RNG | Yes, `vpmuludq` + `vpxord` |
+| SIMD step counter — `IntV` register | Yes, `vpcmpd` + masked `vpsubd` |
+| Zero-cost bit reinterpretation — `__builtin_bit_cast`` | Yes, compiles to `ret |
+| SIMD floor | Yes, `vcvttps2dq` + `vcvtdq2ps` + masked `vsubps` |
 | Brownian bridge barrier correction (compile-time toggle via `if constexpr`) | Yes |
 | Antithetic variance reduction in recovered lanes | Yes |
 | Adaptive compaction threshold | Yes |
@@ -44,7 +43,7 @@ auto result = simd_mc::price(
 // result.price            — discounted option value
 // result.std_error        — Monte Carlo standard error
 // result.paths_simulated  — number of completed paths
-// result.lane_utilisation — average fraction of live SIMD lanes
+// result.lane_utilisation — avg% of live SIMD lanes
 ```
 
 ### Input Parameters
@@ -55,9 +54,9 @@ auto result = simd_mc::price(
 |:----------|:-----|:------------|
 | `initial_spot` | `float` | Current underlying price S₀ |
 | `n_paths` | `int` | Number of Monte Carlo paths (controls accuracy) |
-| `n_steps` | `int` | Time steps per path (252 = daily for 1 year) |
+| `n_steps` | `int` | Time steps per path (eg 252 = daily for 1 year) |
 | `T` | `float` | Time to maturity in years |
-| `risk_free_rate` | `float` | Annualised risk-free rate |
+| `risk_free_rate` | `float` | Annualised r |
 
 </div>
 
@@ -76,58 +75,50 @@ auto result = simd_mc::price(
 
 </div>
 
-### Output Structure
-```cpp
-struct SimulationResult {
-    double price;             // Discounted expected payoff
-    double std_error;         // Welford online standard error
-    int    paths_simulated;   // Paths completed
-    double lane_utilisation;  // Fraction of SIMD lanes doing useful work
-};
-```
-
 ---
 
-## Theory: The Dead Lane Problem
+## Design / Approaches
 
 ### Background: Barrier Options and SIMD
 
-A knock-out barrier option pays `max(S-K, 0)` at expiry **unless** the underlying price `S` breaches a barrier level `B` at any monitoring date during the option's life. If the barrier is hit, the option is cancelled and pays zero.
+A knock-out barrier option pays `max(S-K, 0)` at expiry **unless** the underlying price `S` breaches a barrier level `B` at any monitoring date during the option's life. If the barrier is hit, the option is cancelled hence pays 0.
 
-In a Monte Carlo simulation, each path evolves independently:
+In a Monte Carlo simulation, each path evolves independently according to:
 
 $$ S_{t+\Delta t} = S_t \cdot \exp\left[\left(r - \tfrac{1}{2}\sigma^2\right)\Delta t + \sigma\sqrt{\Delta t}\; Z\right], \quad Z \sim \mathcal{N}(0,1) $$
 
-With SIMD, `W` paths evolve in parallel across a single register. But when a path hits the barrier, its lane "dies" — it continues occupying the register but produces no useful work.
+With SIMD, `W` paths evolve in parallel across a single register. But when a path hits the barrier, its lane "dies", which means it continues occupying the register but is useless.
 
 ### The Problem
 
-On a `W=8` AVX2 register pricing a barrier 5% below spot with 252 daily steps, lane utilisation can collapse to **25–45%** by mid-simulation. You expected an 8x speedup; you got 2x.
+On a `W=8` AVX2 register pricing a barrier 5% below spot with 252 daily steps, lane utilisation can be **25–45%** by mid-simulation.
 
-This is the CPU SIMD analogue of **GPU warp divergence**. GPUs solve it with stream compaction — dead threads are replaced with fresh work. Nobody had applied this technique to CPU SIMD financial Monte Carlo.
+This is the CPU SIMD analogue of **GPU warp divergence**. GPUs solve it with stream compaction - dead threads are replaced with fresh work.
 
-### The Solution: Stream Compaction
+I chose to take a look at this as I am not aware this implementation exists elsewhere (open-source at least). It was also just cool to play around with SIMD in C++23 before it "graduates" out of its experimental package in C++26.
 
-When lanes die, compress survivors to the left side of the register and refill vacated right-side lanes with fresh paths:
+### Stream Compaction
+
+When lanes die, we compress survivors to the left side of the register and refill vacated right-side lanes with fresh paths e.g.:
 
 ```
 Before compaction:  [LIVE] [DEAD] [LIVE] [DEAD] [LIVE] [DEAD] [DEAD] [LIVE]
 After compaction:   [LIVE] [LIVE] [LIVE] [LIVE] [NEW]  [NEW]  [NEW]  [NEW]
 ```
 
-Lane utilisation stays near 100% throughout the simulation.
+Ensuring lane utilisation stays as close as possible to 100% throughout the simulation.
 
 ### Brownian Bridge Correction
 
-Discrete monitoring (checking the barrier at 252 daily steps) misses between-step crossings. The Brownian bridge correction computes the analytical probability that the continuous path crossed the barrier between two discrete observations:
+Discrete monitoring (checking the barrier at 252 daily steps) misses between-step crossings. The Brownian bridge correction finds the analytical probability that the continuous path crossed the barrier between two discrete observations:
 
 $$ P(\text{cross}\mid S_{t}, S_{t+\Delta t}) = \exp\left(\frac{-2\ln(S_t/B)\ln(S_{t+\Delta t}/B)}{\sigma^2 \Delta t}\right) $$
 
-This is a compile-time toggle — `DownAndOutBridge` vs `DownAndOut`. When disabled, the bridge code compiles to nothing.
+This is accessible as an option at compile time - `DownAndOutBridge` vs `DownAndOut`. When disabled, the bridge code compiles to nothing.
 
 ### Knock-In via Parity
 
-Knock-in barriers are priced via the identity:
+Knock-in barriers are priced via:
 
 $$ V_{\text{knock-in}} = V_{\text{vanilla}}^{\text{BS}} - V_{\text{knock-out}}^{\text{MC}} $$
 
@@ -148,7 +139,7 @@ grep -c "call.*logf" output.s    # Should be 0
 
 <div align="center">
 
-| Operation | Instruction(s) | Count | Scalar Loops |
+| Operation | Instruction(s) | Count | Scalar Loops Identified |
 |:----------|:---------------|:-----:|:------------:|
 | GBM evolve: `drift + vol*Z` | `vfmadd132ps` | 1 | 0 |
 | `exp()` Horner polynomial | `vfmadd132ps` / `vfmadd213ps` | 8 | 0 |
@@ -167,13 +158,13 @@ grep -c "call.*logf" output.s    # Should be 0
 
 </div>
 
-The only scalar fallback on the per-step path is `sincos` in Box-Muller — mitigated by caching (fires once per `2W` normals, not every step).
+The only scalar on the per-step path is `sincos` in Box-Muller - mitigated by caching (fires once per `2W` normals, not every step). Maybe someone could take a look at this...
 
 ---
 
 ## Results
 
-### Test Environment
+### Testing
 
 <div align="center">
 
@@ -203,7 +194,7 @@ The only scalar fallback on the per-step path is `sincos` in Box-Muller — miti
 
 </div>
 
-All errors are in the thousandths — consistent with 500k-path MC statistical noise.
+All errors are in the thousandths - consistent with 500k-path MC statistical noise.
 
 ### Barrier Pricing vs Continuous-Monitoring Analytical
 
@@ -216,7 +207,8 @@ All errors are in the thousandths — consistent with 500k-path MC statistical n
 
 </div>
 
-MC prices are **above** the continuous-monitoring analytical price. This is correct: discrete daily monitoring misses between-step barrier crossings, so fewer paths are knocked out, inflating the price. The bias scales with barrier proximity as predicted by Broadie-Glasserman-Kou theory.
+You can see that the MC price is above the continuous-monitoring analytical price. This is fine, as discrete daily monitoring misses between-step barrier crossings, so fewer paths are knocked out, inflating the price.
+The bias scales with barrier proximity as predicted by Broadie-Glasserman-Kou theory. https://www.columbia.edu/~sk75/mfBGK.pdf.
 
 ### Knock-In Parity
 
@@ -232,7 +224,7 @@ MC prices are **above** the continuous-monitoring analytical price. This is corr
 
 </div>
 
-Error is inherited entirely from the knock-out estimate. Validates the §7.3 control variate technique.
+Error is inherited entirely from the knock-out estimate. Notable as it validates use of a control variate.
 
 ### Brownian Bridge Correction
 
@@ -240,17 +232,17 @@ Error is inherited entirely from the knock-out estimate. Validates the §7.3 con
 
 | Method | Price | Error vs Analytical | Improvement |
 |:-------|:------|:-------------------|:------------|
-| Hard barrier check | 10.0240 | 0.0747 | — |
+| Hard barrier check | 10.0240 | 0.0747 | - |
 | **Brownian bridge correction** | **9.9725** | **0.0233** | **3.2×** |
-| Analytical (continuous) | 9.9493 | — | — |
+| Analytical (continuous) | 9.9493 | - | - |
 
 </div>
 
-Same paths, same steps, same RNG. One additional `exp`/`log` per step per lane. The bridge-corrected price is within 0.02 of the continuous-monitoring analytical.
+One additional `exp`/`log` per step per lane. The bridge-corrected price is within 0.02 of the continuous-monitoring analytical.
 
 ### Lane Utilisation
 
-At B=95 (barrier 5% below spot), lane utilisation measured at **92.5%**. Without stream compaction, this would collapse to 25–45% by mid-simulation.
+At B=95 (barrier 5% below spot price), lane utilisation measured at **92.5%**. Without stream compaction, this would likely be 25–45% by mid-simulation.
 
 ### Barrier Proximity Sweep (Crossover Benchmark)
 
@@ -270,16 +262,16 @@ At B=95 (barrier 5% below spot), lane utilisation measured at **92.5%**. Without
 
 </div>
 
-**Key observations:**
-- **Price drops** monotonically as barrier approaches spot (more knock-outs → less payoff)
-- **Execution time drops** with closer barriers (knocked-out paths complete faster, replaced by shorter-lived paths)
-- **Utilisation stays above 98%** across all barrier distances — the stream compaction engine keeps SIMD lanes productive even under heavy knock-out conditions
+**Observations:**
+- Price drops monotonically as barrier approaches spot (more knock-outs → less payoff)
+- Execution time drops with closer barriers (knocked-out paths complete faster, replaced by shorter-lived paths)
+- Utilisation stays above 98% across all barrier distances — the stream compaction engine keeps SIMD lanes productive :)
 
 ---
 
 ## Architecture
 
-Six C++20 concepts define the engine's extension points. Every policy call is inlined at compile time — zero virtual dispatch on the hot path.
+Six C++20 concepts define the engine's extension points, where every policy call is inlined at compile time.
 
 <div align="center">
 
@@ -294,7 +286,7 @@ Six C++20 concepts define the engine's extension points. Every policy call is in
 
 </div>
 
-Adding a new model (Heston, local vol) means writing one struct with an `evolve()` method. Nothing else changes.
+Adding a new model (e.g. Heston, local vol) is easy as you just need to write one struct with an `evolve()` method.
 
 ### SIMD Type Mapping
 
@@ -315,7 +307,6 @@ Adding a new model (Heston, local vol) means writing one struct with an `evolve(
 ### Requirements
 - GCC 11+ (ships `std::experimental::simd` in libstdc++)
 - C++23 mode (`-std=c++23`)
-- No external dependencies
 
 ### Compile
 ```bash
@@ -371,7 +362,7 @@ simd_mc/
 
 </div>
 
-## References
+## Useful Literature
 
 [BGK97] M. Broadie, P. Glasserman, and S. Kou. A continuity correction for discrete barrier options. *Mathematical Finance*, 7(4):325–349, 1997.
 
@@ -382,10 +373,6 @@ simd_mc/
 [GIL08] M. Giles. Multilevel Monte Carlo path simulation. *Operations Research*, 56(3):607–617, 2008.
 
 [JOS03] M. Joshi. *C++ Design Patterns and Derivatives Pricing*. Cambridge University Press, 2003.
-
-[KRE15] M. Kretz. Extending C++ for explicit data-parallel programming via SIMD vector types. PhD thesis, Goethe University Frankfurt, 2015.
-
-[KRE25] M. Kretz. Merge data-parallel types from the Parallelism TS 2. P1928R15, ISO/IEC JTC1/SC22/WG21, 2025.
 
 [LAN18] H. Lang, T. Mühlbauer, F. Funke, P. Boncz, T. Neumann, and A. Kemper. Data blocks: Hybrid OLTP and OLAP on compressed storage using both vectorization and compilation. In *SIGMOD*, 2018.
 
