@@ -1,4 +1,4 @@
-# `simd_mc` — Stream-Compacting Barrier Option Monte Carlo
+# `simd_mc`
 
 ## C++23 | `std::experimental::simd`
 
