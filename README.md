@@ -2,7 +2,7 @@
 
 ## C++23 | `std::experimental::simd`
 
-A header-only C++23 library that prices barrier options via Monte Carlo simulation using `std::experimental::simd` (Parallelism TS 2, GCC 11+). Solves the dead lane problem - the systematic underutilisation of SIMD registers when simulated paths are knocked out by a barrier - via an in-register stream compaction implementation stolen from the people who figured it out for the GPU :)
+A header-only C++23 library that prices barrier options via Monte Carlo simulation using `std::experimental::simd` (Parallelism TS 2, GCC 11+). Solves the dead lane problem - the systematic underutilisation of SIMD registers when simulated paths are knocked out by a barrier - via an in-register stream compaction implementation.
 
 <div align="center">
 
@@ -305,7 +305,7 @@ Adding a new model (e.g. Heston, local vol) is easy as you just need to write on
 ## Build
 
 ### Requirements
-- GCC 11+ (ships `std::experimental::simd` in libstdc++)
+- GCC 11+ (has `std::experimental::simd` in libstdc++)
 - C++23 mode (`-std=c++23`)
 
 ### Compile
@@ -339,7 +339,6 @@ simd_mc/
 ├── src/tests/             # 9 tests (4 vanilla, 5 barrier)
 ├── benchmarks/            # basic_barrier, barrier proximity sweep
 ├── CMakeLists.txt         # GCC, C++23, -O3 -march=native -ffast-math
-└── CMakeSettings.json     # MSYS2 UCRT64 Visual Studio config
 ```
 
 ---
