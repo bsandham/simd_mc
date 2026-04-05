@@ -52,7 +52,7 @@ auto result = simd_mc::price(
 
 | Parameter | Type | Description |
 |:----------|:-----|:------------|
-| `initial_spot` | `float` | Current underlying price S₀ |
+| `initial_spot` | `float` | Underlying spot price |
 | `n_paths` | `int` | Number of Monte Carlo paths (controls accuracy) |
 | `n_steps` | `int` | Time steps per path (eg 252 = daily for 1 year) |
 | `T` | `float` | Time to maturity in years |
@@ -81,7 +81,7 @@ auto result = simd_mc::price(
 
 ### Background: Barrier Options and SIMD
 
-A knock-out barrier option pays `max(S-K, 0)` at expiry **unless** the underlying price `S` breaches a barrier level `B` at any monitoring date during the option's life. If the barrier is hit, the option is cancelled hence pays 0.
+A knock-out barrier option pays `max(S-K, 0)` at expiry unless the underlying price `S` breaches a barrier level `B` at any monitoring date during the option's life. If the barrier is hit, the option is cancelled hence pays 0.
 
 In a Monte Carlo simulation, each path evolves independently according to:
 
@@ -93,7 +93,7 @@ With SIMD, `W` paths evolve in parallel across a single register. But when a pat
 
 On a `W=8` AVX2 register pricing a barrier 5% below spot with 252 daily steps, lane utilisation can be **25–45%** by mid-simulation.
 
-This is the CPU SIMD analogue of **GPU warp divergence**. GPUs solve it with stream compaction - dead threads are replaced with fresh work.
+This is the CPU SIMD analogue of GPU warp divergence. GPUs solve it with stream compaction - dead threads are replaced with fresh work.
 
 I chose to take a look at this as I am not aware this implementation exists elsewhere (open-source at least). It was also just cool to play around with SIMD in C++23 before it "graduates" out of its experimental package in C++26.
 
@@ -139,7 +139,7 @@ grep -c "call.*logf" output.s    # Should be 0
 
 <div align="center">
 
-| Operation | Instruction(s) | Count | Scalar Loops Identified |
+| Operation | Instruction(s) | Count | Scalar Loops |
 |:----------|:---------------|:-----:|:------------:|
 | GBM evolve: `drift + vol*Z` | `vfmadd132ps` | 1 | 0 |
 | `exp()` Horner polynomial | `vfmadd132ps` / `vfmadd213ps` | 8 | 0 |
@@ -173,11 +173,9 @@ The only scalar on the per-step path is `sincos` in Box-Muller - mitigated by ca
 | Compiler | GCC 13.2 (MSYS2 UCRT64) |
 | Standard | C++23 (`-std=c++23`) |
 | Flags | `-O3 -march=native -ffast-math` |
-| ISA | AVX2, 8-wide (`native_simd<float>::size() = 8`) |
-| OS | Windows 11, MSYS2 |
+| ISA | AVX2, 8-wide |
 | Paths | 500,000 |
 | Steps | 252 (daily monitoring, T=1 year) |
-| Parameters | S₀=100, K=100, r=5%, σ=20%, T=1y |
 
 </div>
 
@@ -194,7 +192,7 @@ The only scalar on the per-step path is `sincos` in Box-Muller - mitigated by ca
 
 </div>
 
-All errors are in the thousandths - consistent with 500k-path MC statistical noise.
+All errors are in the thousandths, consistent with 500k-path MC statistical noise.
 
 ### Barrier Pricing vs Continuous-Monitoring Analytical
 
@@ -208,7 +206,7 @@ All errors are in the thousandths - consistent with 500k-path MC statistical noi
 </div>
 
 You can see that the MC price is above the continuous-monitoring analytical price. This is fine, as discrete daily monitoring misses between-step barrier crossings, so fewer paths are knocked out, inflating the price.
-The bias scales with barrier proximity as predicted by Broadie-Glasserman-Kou theory. https://www.columbia.edu/~sk75/mfBGK.pdf.
+The bias scales with barrier proximity as predicted by Broadie-Glasserman-Kou theory (check out https://www.columbia.edu/~sk75/mfBGK.pd)f.
 
 ### Knock-In Parity
 
@@ -218,7 +216,7 @@ The bias scales with barrier proximity as predicted by Broadie-Glasserman-Kou th
 |:----------|:------|
 | Vanilla Black-Scholes (exact) | 10.4506 |
 | Knock-Out MC (B=85) | 10.0240 |
-| **Knock-In via parity** | **0.4266** |
+| Knock-In via parity | 0.4266 |
 | Knock-In analytical (cont.) | 0.5013 |
 | Error | 0.0747 |
 
@@ -233,7 +231,7 @@ Error is inherited entirely from the knock-out estimate. Notable as it validates
 | Method | Price | Error vs Analytical | Improvement |
 |:-------|:------|:-------------------|:------------|
 | Hard barrier check | 10.0240 | 0.0747 | - |
-| **Brownian bridge correction** | **9.9725** | **0.0233** | **3.2×** |
+| Brownian bridge correction | 9.9725 | 0.0233 | 3.2x |
 | Analytical (continuous) | 9.9493 | - | - |
 
 </div>
@@ -242,7 +240,7 @@ One additional `exp`/`log` per step per lane. The bridge-corrected price is with
 
 ### Lane Utilisation
 
-At B=95 (barrier 5% below spot price), lane utilisation measured at **92.5%**. Without stream compaction, this would likely be 25–45% by mid-simulation.
+At B=95 (barrier 5% below spot price), lane utilisation measured at 99.1%. Without stream compaction, this would likely be 25–45% by mid-simulation.
 
 ### Barrier Proximity Sweep (Crossover Benchmark)
 
