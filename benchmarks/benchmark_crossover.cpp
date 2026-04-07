@@ -24,7 +24,6 @@ int main() {
 
     std::printf("%-10s %-12s %-12s %-10s %-10s\n",
                 "Barrier", "Price", "Std Error", "Util %", "Time (ms)");
-    std::printf("──────────────────────────────────────────────────────────\n");
 
     for (float B : barriers) {
         auto config = SimConfig{

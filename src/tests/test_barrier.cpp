@@ -172,7 +172,7 @@ int main() {
 
         // bridge should be closer to analytical (continuous monitoring) price but with MC noise this isn't guaranteed every run, so use generous tolerance
         bool ok = err_bridge < err_hard + 0.5;
-        std::printf("  Bridge ≤ Hard+noise: %s\n", ok ? "PASS" : "FAIL");
+        std::printf("  Bridge less than or equal to Hard+noise: %s\n", ok ? "PASS" : "FAIL");
         if (ok) ++pass; else ++fail;
     }
 

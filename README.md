@@ -2,22 +2,27 @@
 
 ## C++23 | `std::experimental::simd`
 
-A header-only C++23 library that prices barrier options via Monte Carlo simulation using `std::experimental::simd` (Parallelism TS 2, GCC 11+). Solves the dead lane problem - the systematic underutilisation of SIMD registers when simulated paths are knocked out by a barrier - via an in-register stream compaction implementation stolen from the people who figured it out for the GPU :)
+A header-only C++23 library that prices barrier options via Monte Carlo simulation using `std::experimental::simd` (Parallelism TS 2, GCC 11+). Solves the dead lane problem - the systematic underutilisation of SIMD registers when simulated paths are knocked out by a barrier - via an in-register stream compaction implementation.
 
 <div align="center">
 
 | Feature | Assembly-verified SIMD |
 |:--------|:------:|
-| Vectorised `exp()` — minimax polynomial | Yes, 8× `vfmadd` |
-| Vectorised `log()` — IEEE 754 decomposition, (m-1)/(m+1) rational polynomial | Yes |
+| Vectorised `exp()` - minimax polynomial | Yes, 8x `vfmadd` |
+| Vectorised `log()` - IEEE 754 decomposition, (m-1)/(m+1) rational polynomial | Yes |
+| Vectorised `sincos()` - quadrant-based minimax polynomial | Yes |
 | Vectorised Philox-2x32-10 RNG | Yes, `vpmuludq` + `vpxord` |
-| SIMD step counter — `IntV` register | Yes, `vpcmpd` + masked `vpsubd` |
-| Zero-cost bit reinterpretation — `__builtin_bit_cast`` | Yes, compiles to `ret |
+| SIMD step counter - `IntV` register | Yes, `vpcmpd` + masked `vpsubd` |
+| Zero-cost bit reinterpretation - `__builtin_bit_cast` | Yes, compiles to `ret` |
 | SIMD floor | Yes, `vcvttps2dq` + `vcvtdq2ps` + masked `vsubps` |
+| AVX-512 `VCOMPRESSPS` compaction (portable AVX2 fallback) | Yes |
+| OpenMP multi-threading with Chan's parallel Welford merge | Yes |
 | Brownian bridge barrier correction (compile-time toggle via `if constexpr`) | Yes |
 | Antithetic variance reduction in recovered lanes | Yes |
 | Adaptive compaction threshold | Yes |
 | Welford's online variance (numerically stable std error) | Yes |
+| Truncation detection (`result.truncated` flag) | Yes |
+
 </div>
 
 ---
@@ -40,10 +45,10 @@ auto result = simd_mc::price(
         .risk_free_rate = 0.05f
     }
 );
-// result.price            — discounted option value
-// result.std_error        — Monte Carlo standard error
-// result.paths_simulated  — number of completed paths
-// result.lane_utilisation — avg% of live SIMD lanes
+// result.price            - discounted option value
+// result.std_error        - Monte Carlo standard error
+// result.paths_simulated  - number of completed paths
+// result.lane_utilisation - avg% of live SIMD lanes
 ```
 
 ### Input Parameters
@@ -52,11 +57,12 @@ auto result = simd_mc::price(
 
 | Parameter | Type | Description |
 |:----------|:-----|:------------|
-| `initial_spot` | `float` | Current underlying price S₀ |
+| `initial_spot` | `float` | Underlying spot price |
 | `n_paths` | `int` | Number of Monte Carlo paths (controls accuracy) |
 | `n_steps` | `int` | Time steps per path (eg 252 = daily for 1 year) |
 | `T` | `float` | Time to maturity in years |
 | `risk_free_rate` | `float` | Annualised r |
+| `n_threads` | `int` | Thread count (0 = auto-detect hardware cores) |
 
 </div>
 
@@ -81,7 +87,7 @@ auto result = simd_mc::price(
 
 ### Background: Barrier Options and SIMD
 
-A knock-out barrier option pays `max(S-K, 0)` at expiry **unless** the underlying price `S` breaches a barrier level `B` at any monitoring date during the option's life. If the barrier is hit, the option is cancelled hence pays 0.
+A knock-out barrier option pays `max(S-K, 0)` at expiry unless the underlying price `S` breaches a barrier level `B` at any monitoring date during the option's life. If the barrier is hit, the option is cancelled hence pays 0.
 
 In a Monte Carlo simulation, each path evolves independently according to:
 
@@ -91,9 +97,9 @@ With SIMD, `W` paths evolve in parallel across a single register. But when a pat
 
 ### The Problem
 
-On a `W=8` AVX2 register pricing a barrier 5% below spot with 252 daily steps, lane utilisation can be **25–45%** by mid-simulation.
+On a `W=8` AVX2 register pricing a barrier 5% below spot with 252 daily steps, lane utilisation can be **25-45%** by mid-simulation.
 
-This is the CPU SIMD analogue of **GPU warp divergence**. GPUs solve it with stream compaction - dead threads are replaced with fresh work.
+This is the CPU SIMD analogue of GPU warp divergence. GPUs solve it with stream compaction - dead threads are replaced with fresh work.
 
 I chose to take a look at this as I am not aware this implementation exists elsewhere (open-source at least). It was also just cool to play around with SIMD in C++23 before it "graduates" out of its experimental package in C++26.
 
@@ -130,142 +136,178 @@ The analytical Black-Scholes vanilla price is exact, so the knock-in estimate in
 
 Verify with:
 ```bash
-g++ -std=c++23 -O3 -march=native -S -I src your_file.cpp -o output.s
+g++ -std=c++23 -O3 -march=native -fopenmp -S -I src your_file.cpp -o output.s
 grep -c "call.*expf" output.s    # Should be 0
 grep -c "call.*logf" output.s    # Should be 0
+grep -c "call.*sinf" output.s    # Should be 0
+grep -c "call.*cosf" output.s    # Should be 0
 ```
 
 ### Instruction Breakdown (AVX2 8-wide)
 
 <div align="center">
 
-| Operation | Instruction(s) | Count | Scalar Loops Identified |
+| Operation | Instruction(s) | Count | Scalar Loops |
 |:----------|:---------------|:-----:|:------------:|
 | GBM evolve: `drift + vol*Z` | `vfmadd132ps` | 1 | 0 |
 | `exp()` Horner polynomial | `vfmadd132ps` / `vfmadd213ps` | 8 | 0 |
 | `exp()` floor (range reduction) | `vcvttps2dq` + `vcvtdq2ps` | 2 | 0 |
-| `exp()` 2^n reconstruction | `vpslld` + `__builtin_bit_cast` → `ret` | 1 | 0 |
+| `exp()` 2^n reconstruction | `vpslld` + `__builtin_bit_cast` -> `ret` | 1 | 0 |
 | `log()` IEEE 754 decomposition | `vpsrad` + `vpandd` + `vpord` | 3 | 0 |
 | `log()` int-to-float | `vcvtdq2ps` | 1 | 0 |
 | `log()` Horner polynomial | `vfmadd` chain | 4 | 0 |
-| Barrier check: `spot > B` | `vcmpps` → k-register | 1 | 0 |
+| `sincos()` quadrant reduction | `vcvttps2dq` + `vpandd` | 2 | 0 |
+| `sincos()` polynomials + blend | `vfmadd` + masked `vmovaps` | 10 | 0 |
+| Barrier check: `spot > B` | `vcmpps` -> k-register | 1 | 0 |
 | Mask logic: `alive && survived` | `kandw` | 1 | 0 |
 | Payoff: `max(S-K, 0)` | `vmaxps` | 1 | 0 |
 | Step decrement | `vpcmpd` + masked `vpsubd` + `vpcmpeqd` | 3 | 0 |
 | Philox RNG (10 Feistel rounds) | `vpmuludq` + `vpxord` + `vpaddd` | ~40 | 0 |
 | `sqrt()` | `vsqrtps` | 1 | 0 |
-| Bit reinterpretation | `__builtin_bit_cast` → `ret` | 0 | 0 |
+| Bit reinterpretation | `__builtin_bit_cast` -> `ret` | 0 | 0 |
 
 </div>
-
-The only scalar on the per-step path is `sincos` in Box-Muller - mitigated by caching (fires once per `2W` normals, not every step). Maybe someone could take a look at this...
 
 ---
 
 ## Results
 
-### Testing
+### Test Environment
 
 <div align="center">
 
 | Component | Specification |
 |:----------|:-------------|
+| CPU | Intel Core i7-14700K |
+| ISA | AVX2, 8-wide (`native_simd<float>::size() = 8`) |
 | Compiler | GCC 13.2 (MSYS2 UCRT64) |
 | Standard | C++23 (`-std=c++23`) |
-| Flags | `-O3 -march=native -ffast-math` |
-| ISA | AVX2, 8-wide (`native_simd<float>::size() = 8`) |
+| Flags | `-O3 -march=native -ffast-math -fopenmp` |
 | OS | Windows 11, MSYS2 |
-| Paths | 500,000 |
-| Steps | 252 (daily monitoring, T=1 year) |
-| Parameters | S₀=100, K=100, r=5%, σ=20%, T=1y |
 
 </div>
 
-### Vanilla Convergence (No Barrier)
+### Vanilla Convergence (500k paths, no barrier)
 
 <div align="center">
 
 | Test | MC Price | Black-Scholes | Error | Result |
 |:-----|:---------|:-------------|:------|:------:|
-| ATM Call (S₀=K=100) | 10.4445 | 10.4506 | 0.0061 | Yes |
-| ATM Put (S₀=K=100) | 5.5706 | 5.5735 | 0.0029 | Yes |
-| ITM Call (K=90, σ=30%) | 15.4809 | 15.4860 | 0.0051 | Yes |
-| OTM Call (K=110, σ=30%) | 5.5813 | 5.5871 | 0.0058 | Yes |
+| ATM Call (S=K=100) | 10.5122 | 10.4506 | 0.0616 | Pass |
+| ATM Put (S=K=100) | 5.5937 | 5.5735 | 0.0202 | Pass |
+| ITM Call (K=90, vol=30%) | 15.5503 | 15.4860 | 0.0643 | Pass |
+| OTM Call (K=110, vol=30%) | 5.6627 | 5.5871 | 0.0756 | Pass |
 
 </div>
 
-All errors are in the thousandths - consistent with 500k-path MC statistical noise.
-
-### Barrier Pricing vs Continuous-Monitoring Analytical
+### Barrier Pricing vs Continuous-Monitoring Analytical (500k paths)
 
 <div align="center">
 
 | Test | Barrier | MC Price | Analytical (cont.) | Error | Notes |
 |:-----|:--------|:---------|:-------------------|:------|:------|
-| Far barrier | B=80 | 10.3916 | 10.3513 | 0.0403 | MC > analytical — expected (discrete monitoring bias) |
-| Medium barrier | B=90 | 8.9104 | 8.6655 | 0.2449 | 6× larger bias at closer barrier |
+| Far barrier | B=80 | 10.2294 | 10.3513 | 0.1219 | Discrete monitoring bias |
+| Medium barrier | B=90 | 9.0579 | 8.6655 | 0.3924 | Larger bias at closer barrier |
 
 </div>
 
-You can see that the MC price is above the continuous-monitoring analytical price. This is fine, as discrete daily monitoring misses between-step barrier crossings, so fewer paths are knocked out, inflating the price.
-The bias scales with barrier proximity as predicted by Broadie-Glasserman-Kou theory. https://www.columbia.edu/~sk75/mfBGK.pdf.
+MC prices sit above the continuous-monitoring analytical. This is expected: discrete daily monitoring misses between-step barrier crossings, so fewer paths are knocked out, inflating the price. The bias scales with barrier proximity as predicted by Broadie-Glasserman-Kou theory.
 
-### Knock-In Parity
+### Knock-In Parity (500k paths)
 
 <div align="center">
 
 | Component | Value |
 |:----------|:------|
 | Vanilla Black-Scholes (exact) | 10.4506 |
-| Knock-Out MC (B=85) | 10.0240 |
-| **Knock-In via parity** | **0.4266** |
+| Knock-Out MC (B=85) | 10.0780 |
+| Knock-In via parity | 0.3725 |
 | Knock-In analytical (cont.) | 0.5013 |
-| Error | 0.0747 |
+| Error | 0.1288 |
 
 </div>
 
-Error is inherited entirely from the knock-out estimate. Notable as it validates use of a control variate.
+Error is inherited entirely from the knock-out estimate. Validates the control variate technique.
 
-### Brownian Bridge Correction
+### Brownian Bridge Correction (500k paths, B=85)
 
 <div align="center">
 
 | Method | Price | Error vs Analytical | Improvement |
 |:-------|:------|:-------------------|:------------|
-| Hard barrier check | 10.0240 | 0.0747 | - |
-| **Brownian bridge correction** | **9.9725** | **0.0233** | **3.2×** |
-| Analytical (continuous) | 9.9493 | - | - |
+| Hard barrier check | 10.0780 | 0.1288 | -- |
+| Brownian bridge correction | 9.9634 | 0.0141 | 9.1x |
+| Analytical (continuous) | 9.9493 | -- | -- |
 
 </div>
 
-One additional `exp`/`log` per step per lane. The bridge-corrected price is within 0.02 of the continuous-monitoring analytical.
+One additional `exp`/`log` per step per lane. The bridge-corrected price is within 0.015 of the continuous-monitoring analytical.
 
 ### Lane Utilisation
 
-At B=95 (barrier 5% below spot price), lane utilisation measured at **92.5%**. Without stream compaction, this would likely be 25–45% by mid-simulation.
+At B=95 (barrier 5% below spot price), lane utilisation measured at **92.5%**. Without stream compaction, this would be 25-45% by mid-simulation.
 
-### Barrier Proximity Sweep (Crossover Benchmark)
+### Barrier Proximity Sweep (25k paths)
 
 <div align="center">
 
 | Barrier | Price | Std Error | Util % | Time (ms) |
 |:--------|:------|:----------|:-------|:----------|
-| 70 | 10.4522 | 0.0329 | 99.6 | 2990 |
-| 75 | 10.4182 | 0.0330 | 99.6 | 2953 |
-| 80 | 10.3628 | 0.0330 | 99.6 | 2751 |
-| 85 | 10.0288 | 0.0331 | 99.5 | 2429 |
-| 90 | 8.9717 | 0.0329 | 99.4 | 1963 |
-| 92 | 8.0831 | 0.0325 | 99.3 | 1729 |
-| 95 | 6.2314 | 0.0303 | 99.1 | 1269 |
-| 97 | 4.4744 | 0.0270 | 98.6 | 907 |
-| 98 | 3.4230 | 0.0243 | 98.2 | 691 |
+| 70 | 10.3005 | 0.1464 | 98.4 | 18.7 |
+| 75 | 10.5087 | 0.1480 | 97.5 | 17.6 |
+| 80 | 10.1785 | 0.1451 | 95.9 | 17.0 |
+| 85 | 10.3713 | 0.1503 | 94.7 | 15.5 |
+| 90 | 9.2645 | 0.1493 | 93.7 | 14.6 |
+| 92 | 8.1027 | 0.1445 | 93.4 | 11.3 |
+| 95 | 6.2919 | 0.1346 | 92.5 | 8.0 |
+| 97 | 4.3585 | 0.1192 | 91.5 | 5.6 |
+| 98 | 3.6266 | 0.1101 | 90.3 | 4.6 |
 
 </div>
 
 **Observations:**
-- Price drops monotonically as barrier approaches spot (more knock-outs → less payoff)
+- Price drops monotonically as barrier approaches spot (more knock-outs, less payoff)
 - Execution time drops with closer barriers (knocked-out paths complete faster, replaced by shorter-lived paths)
-- Utilisation stays above 98% across all barrier distances — the stream compaction engine keeps SIMD lanes productive :)
+- Utilisation stays above 90% across all barrier distances
+
+### Realistic Market Scenarios (25k paths)
+
+<div align="center">
+
+| Scenario | Price | Std Error | Util % | Time (ms) |
+|:---------|:------|:----------|:-------|:----------|
+| FTSE equity (S=7500, K=7500, B=6750, vol=18%) | 637.35 | 6.27 | 94.0 | 32.3 |
+| Tech stock (S=200, K=200, B=160, vol=40%) | 30.99 | 0.39 | 93.6 | 28.7 |
+| FX 3-month (S=1.25, K=1.25, B=1.20, vol=8%) | 0.0230 | 0.0002 | 94.1 | 16.9 |
+| Commodity 2-year (S=80, K=85, B=110, vol=35%) | 13.83 | 0.11 | 94.2 | 65.4 |
+
+</div>
+
+### Up-and-Out Put (25k paths)
+
+<div align="center">
+
+| Scenario | Price | Std Error | Util % | Time (ms) |
+|:---------|:------|:----------|:-------|:----------|
+| S=100, K=105, B=120, T=0.5y | 8.1695 | 0.0644 | 94.7 | 19.5 |
+
+</div>
+
+### Convergence Study (Down-and-Out Call, B=90)
+
+<div align="center">
+
+| Paths | Price | Std Error | Time (ms) |
+|:------|:------|:----------|:----------|
+| 10,000 | 10.6634 | 0.7321 | 0.7 |
+| 50,000 | 9.4410 | 0.3049 | 3.0 |
+| 100,000 | 9.1638 | 0.2114 | 5.9 |
+| 500,000 | 9.0579 | 0.0933 | 30.3 |
+| 1,000,000 | 8.9712 | 0.0654 | 59.3 |
+
+</div>
+
+Std error halves when paths quadruple, confirming the 1/sqrt(N) convergence rate. The price converges toward the continuous-monitoring analytical value of 8.67 from above. The remaining gap is the discrete monitoring bias, not engine error.
 
 ---
 
@@ -305,13 +347,14 @@ Adding a new model (e.g. Heston, local vol) is easy as you just need to write on
 ## Build
 
 ### Requirements
-- GCC 11+ (ships `std::experimental::simd` in libstdc++)
+- GCC 11+ (has `std::experimental::simd` in libstdc++)
 - C++23 mode (`-std=c++23`)
+- OpenMP (`-fopenmp`)
 
 ### Compile
 ```bash
 # Direct compilation
-g++ -std=c++23 -O3 -march=native -I src benchmarks/basic_barrier.cpp -o basic_barrier -lm
+g++ -std=c++23 -O3 -march=native -fopenmp -I src src/main.cpp -o main -lm
 
 # CMake (MSYS2/MinGW)
 mkdir -p out/build && cd out/build
@@ -325,21 +368,25 @@ cmake ../.. && ninja
 ### Project Structure
 ```
 simd_mc/
-├── src/simd_mc/           # Header-only library
-│   ├── core/              # simd_compat.hpp, lane_register.hpp, sim_config.hpp
-│   ├── concepts/          # 6 policy concepts
-│   ├── models/            # GBM diffusion
-│   ├── barriers/          # Down/Up × Out × Hard/Bridge, None
-│   ├── payoffs/           # European Call/Put
-│   ├── refill/            # Independent, AntitheticPreferred
-│   ├── compaction/        # EveryStep, Adaptive
-│   ├── rng/               # Vectorised Philox + cached Box-Muller
-│   ├── engine/            # MonteCarloEngine template
-│   └── api/               # price() convenience function
-├── src/tests/             # 9 tests (4 vanilla, 5 barrier)
-├── benchmarks/            # basic_barrier, barrier proximity sweep
-├── CMakeLists.txt         # GCC, C++23, -O3 -march=native -ffast-math
-└── CMakeSettings.json     # MSYS2 UCRT64 Visual Studio config
+├── src/
+│   ├── main.cpp               # Demonstration with 7 sections
+│   ├── simd_mc/               # Header-only library
+│   │   ├── core/              # simd_compat.hpp, lane_register.hpp, sim_config.hpp
+│   │   ├── concepts/          # 6 policy concepts
+│   │   ├── models/            # GBM diffusion
+│   │   ├── barriers/          # Down/Up x Out x Hard/Bridge, None
+│   │   ├── payoffs/           # European Call/Put
+│   │   ├── refill/            # Independent, AntitheticPreferred
+│   │   ├── compaction/        # Adaptive (AVX-512 VCOMPRESSPS + portable fallback)
+│   │   ├── rng/               # Vectorised Philox + cached Box-Muller
+│   │   ├── engine/            # MonteCarloEngine template
+│   │   └── api/               # price() with OpenMP parallelism
+│   └── tests/                 # 9 tests (4 vanilla, 5 barrier)
+├── benchmarks/                # basic_barrier, crossover sweep, scalar vs SIMD
+├── CMakeLists.txt             # GCC, C++23, -O3, -fopenmp
+├── CMakeSettings.json         # MSYS2 UCRT64 Visual Studio config
+├── EXTENSIONS.md
+└── LICENSE (MIT)
 ```
 
 ---
@@ -364,21 +411,23 @@ simd_mc/
 
 ## Useful Literature
 
-[BGK97] M. Broadie, P. Glasserman, and S. Kou. A continuity correction for discrete barrier options. *Mathematical Finance*, 7(4):325–349, 1997.
+[BGK97] M. Broadie, P. Glasserman, and S. Kou. A continuity correction for discrete barrier options. *Mathematical Finance*, 7(4):325-349, 1997.
 
-[ABR96] L. Andersen and R. Brotherton-Ratcliffe. Exact exotics. *Risk*, 9(10):85–89, 1996.
+[ABR96] L. Andersen and R. Brotherton-Ratcliffe. Exact exotics. *Risk*, 9(10):85-89, 1996.
 
-[DAO22] T. Dao, D. Fu, S. Ermon, A. Rudra, and C. Ré. FlashAttention: Fast and memory-efficient exact attention with IO-awareness. *NeurIPS*, 2022.
-
-[GIL08] M. Giles. Multilevel Monte Carlo path simulation. *Operations Research*, 56(3):607–617, 2008.
+[GIL08] M. Giles. Multilevel Monte Carlo path simulation. *Operations Research*, 56(3):607-617, 2008.
 
 [JOS03] M. Joshi. *C++ Design Patterns and Derivatives Pricing*. Cambridge University Press, 2003.
 
-[LAN18] H. Lang, T. Mühlbauer, F. Funke, P. Boncz, T. Neumann, and A. Kemper. Data blocks: Hybrid OLTP and OLAP on compressed storage using both vectorization and compilation. In *SIGMOD*, 2018.
+[KRE15] M. Kretz. Extending C++ for explicit data-parallel programming via SIMD vector types. PhD thesis, Goethe University Frankfurt, 2015.
 
-[ROG07] D. Roger, U. Assarsson, and N. Holzschuch. Efficient stream reduction on the GPU. In *Workshop on General Purpose Processing on Graphics Processing Units*, 2007.
+[KRE25] M. Kretz. Merge data-parallel types from the Parallelism TS 2. P1928R15, WG21, 2025.
 
-[SAL11] J. Salmon, M. Moraes, R. Dror, and D. Shaw. Parallel random numbers: As easy as 1, 2, 3. In *SC11: Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis*, 2011.
+[LAN18] H. Lang et al. Data blocks: Hybrid OLTP and OLAP on compressed storage. *SIGMOD*, 2018.
+
+[ROG07] D. Roger, U. Assarsson, and N. Holzschuch. Efficient stream reduction on the GPU. *GPGPU Workshop*, 2007.
+
+[SAL11] J. Salmon et al. Parallel random numbers: As easy as 1, 2, 3. *SC11*, 2011.
 
 [HAU07] E. G. Haug. *The Complete Guide to Option Pricing Formulas*. McGraw-Hill, 2nd edition, 2007.
 

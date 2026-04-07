@@ -15,7 +15,7 @@ static double bs_call(double S, double K, double r, double sigma, double T) {
 int main() {
     using namespace simd_mc;
 
-    std::printf("simd_mc — Stream-Compacting Barrier Option Monte Carlo\n");
+    std::printf("simd_mc - Stream-Compacting Barrier Option Monte Carlo\n");
     std::printf("SIMD width: %d lanes (float32)\n\n", simd_mc::simd_width);
 
     float S0    = 100.0f;
@@ -93,7 +93,7 @@ int main() {
         std::printf("  Monte Carlo:    %.4f (±%.4f)\n", result.price, result.std_error);
         std::printf("  Paths:          %d\n", result.paths_simulated);
         std::printf("  Lane util:      %.1f%%\n", result.lane_utilisation * 100);
-        std::printf("  (Lower util expected — more knock-outs >  more compaction)\n\n");
+        std::printf("  (Lower util expected as more knock-outs > more compaction)\n\n");
     }
 
     return 0;
