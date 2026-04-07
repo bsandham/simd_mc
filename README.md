@@ -182,14 +182,8 @@ grep -c "call.*cosf" output.s    # Should be 0
 | ISA | AVX2, 8-wide (`native_simd<float>::size() = 8`) |
 | Compiler | GCC 13.2 (MSYS2 UCRT64) |
 | Standard | C++23 (`-std=c++23`) |
-| Flags | `-O3 -march=native -ffast-math` |
-| ISA | AVX2, 8-wide |
-| Paths | 500,000 |
-| Steps | 252 (daily monitoring, T=1 year) |
-| Steps | 252 (daily monitoring, T=1 year) |
-| Parameters | S₀=100, K=100, r=5%, σ=20%, T=1y |
-| Steps | 252 (daily monitoring, T=1 year) |
-| Parameters | S₀=100, K=100, r=5%, σ=20%, T=1y |
+| Flags | `-O3 -march=native -ffast-math -fopenmp` |
+| OS | Windows 11, MSYS2 |
 
 </div>
 
@@ -202,33 +196,32 @@ grep -c "call.*cosf" output.s    # Should be 0
 | ATM Call (S=K=100) | 10.5122 | 10.4506 | 0.0616 | Pass |
 | ATM Put (S=K=100) | 5.5937 | 5.5735 | 0.0202 | Pass |
 | ITM Call (K=90, vol=30%) | 15.5503 | 15.4860 | 0.0643 | Pass |
-All errors are in the thousandths, consistent with 500k-path MC statistical noise.
+| OTM Call (K=110, vol=30%) | 5.6627 | 5.5871 | 0.0756 | Pass |
 
 </div>
 
-All errors are in the thousandths - consistent with 500k-path MC statistical noise.
+### Barrier Pricing vs Continuous-Monitoring Analytical (500k paths)
 
 <div align="center">
 
 | Test | Barrier | MC Price | Analytical (cont.) | Error | Notes |
 |:-----|:--------|:---------|:-------------------|:------|:------|
 | Far barrier | B=80 | 10.2294 | 10.3513 | 0.1219 | Discrete monitoring bias |
-You can see that the MC price is above the continuous-monitoring analytical price. This is fine, as discrete daily monitoring misses between-step barrier crossings, so fewer paths are knocked out, inflating the price.
-The bias scales with barrier proximity as predicted by Broadie-Glasserman-Kou theory (check out https://www.columbia.edu/~sk75/mfBGK.pd)f.
+| Medium barrier | B=90 | 9.0579 | 8.6655 | 0.3924 | Larger bias at closer barrier |
+
 </div>
 
-You can see that the MC price is above the continuous-monitoring analytical price. This is fine, as discrete daily monitoring misses between-step barrier crossings, so fewer paths are knocked out, inflating the price.
-The bias scales with barrier proximity as predicted by Broadie-Glasserman-Kou theory. https://www.columbia.edu/~sk75/mfBGK.pdf.
+MC prices sit above the continuous-monitoring analytical. This is expected: discrete daily monitoring misses between-step barrier crossings, so fewer paths are knocked out, inflating the price. The bias scales with barrier proximity as predicted by Broadie-Glasserman-Kou theory.
 
 ### Knock-In Parity (500k paths)
 
 <div align="center">
-| Knock-Out MC (B=85) | 10.0240 |
-| Knock-In via parity | 0.4266 |
+
+| Component | Value |
 |:----------|:------|
 | Vanilla Black-Scholes (exact) | 10.4506 |
-| Knock-Out MC (B=85) | 10.0240 |
-| **Knock-In via parity** | **0.4266** |
+| Knock-Out MC (B=85) | 10.0780 |
+| Knock-In via parity | 0.3725 |
 | Knock-In analytical (cont.) | 0.5013 |
 | Error | 0.1288 |
 
@@ -238,21 +231,21 @@ Error is inherited entirely from the knock-out estimate. Validates the control v
 
 ### Brownian Bridge Correction (500k paths, B=85)
 
-| Hard barrier check | 10.0240 | 0.0747 | - |
-| Brownian bridge correction | 9.9725 | 0.0233 | 3.2x |
-| Analytical (continuous) | 9.9493 | - | - |
+<div align="center">
+
+| Method | Price | Error vs Analytical | Improvement |
 |:-------|:------|:-------------------|:------------|
-| Hard barrier check | 10.0240 | 0.0747 | - |
-| **Brownian bridge correction** | **9.9725** | **0.0233** | **3.2×** |
-| Analytical (continuous) | 9.9493 | - | - |
+| Hard barrier check | 10.0780 | 0.1288 | -- |
+| Brownian bridge correction | 9.9634 | 0.0141 | 9.1x |
+| Analytical (continuous) | 9.9493 | -- | -- |
 
 </div>
 
-At B=95 (barrier 5% below spot price), lane utilisation measured at 99.1%. Without stream compaction, this would likely be 25–45% by mid-simulation.
+One additional `exp`/`log` per step per lane. The bridge-corrected price is within 0.015 of the continuous-monitoring analytical.
 
 ### Lane Utilisation
 
-At B=95 (barrier 5% below spot price), lane utilisation measured at **92.5%**. Without stream compaction, this would likely be 25–45% by mid-simulation.
+At B=95 (barrier 5% below spot price), lane utilisation measured at **92.5%**. Without stream compaction, this would be 25-45% by mid-simulation.
 
 ### Barrier Proximity Sweep (25k paths)
 
@@ -371,24 +364,29 @@ cmake ../.. && ninja
 ./test_vanilla
 ./test_barrier
 ```
-├── src/simd_mc/           # Header-only library
-│   ├── core/              # simd_compat.hpp, lane_register.hpp, sim_config.hpp
-│   ├── concepts/          # 6 policy concepts
-│   ├── models/            # GBM diffusion
-│   ├── barriers/          # Down/Up × Out × Hard/Bridge, None
-│   ├── payoffs/           # European Call/Put
-│   ├── refill/            # Independent, AntitheticPreferred
-│   ├── compaction/        # EveryStep, Adaptive
-│   ├── rng/               # Vectorised Philox + cached Box-Muller
-│   ├── engine/            # MonteCarloEngine template
-│   └── api/               # price() convenience function
-├── src/tests/             # 9 tests (4 vanilla, 5 barrier)
-├── benchmarks/            # basic_barrier, barrier proximity sweep
-├── CMakeLists.txt         # GCC, C++23, -O3 -march=native -ffast-math
-├── src/tests/             # 9 tests (4 vanilla, 5 barrier)
-├── benchmarks/            # basic_barrier, barrier proximity sweep
-├── CMakeLists.txt         # GCC, C++23, -O3 -march=native -ffast-math
-└── CMakeSettings.json     # MSYS2 UCRT64 Visual Studio config
+
+### Project Structure
+```
+simd_mc/
+├── src/
+│   ├── main.cpp               # Demonstration with 7 sections
+│   ├── simd_mc/               # Header-only library
+│   │   ├── core/              # simd_compat.hpp, lane_register.hpp, sim_config.hpp
+│   │   ├── concepts/          # 6 policy concepts
+│   │   ├── models/            # GBM diffusion
+│   │   ├── barriers/          # Down/Up x Out x Hard/Bridge, None
+│   │   ├── payoffs/           # European Call/Put
+│   │   ├── refill/            # Independent, AntitheticPreferred
+│   │   ├── compaction/        # Adaptive (AVX-512 VCOMPRESSPS + portable fallback)
+│   │   ├── rng/               # Vectorised Philox + cached Box-Muller
+│   │   ├── engine/            # MonteCarloEngine template
+│   │   └── api/               # price() with OpenMP parallelism
+│   └── tests/                 # 9 tests (4 vanilla, 5 barrier)
+├── benchmarks/                # basic_barrier, crossover sweep, scalar vs SIMD
+├── CMakeLists.txt             # GCC, C++23, -O3, -fopenmp
+├── CMakeSettings.json         # MSYS2 UCRT64 Visual Studio config
+├── EXTENSIONS.md
+└── LICENSE (MIT)
 ```
 
 ---
